@@ -2,3 +2,6 @@ pandas
 numpy
 streamlit
 scikit-learn
+joblib
+plotly
+pytest

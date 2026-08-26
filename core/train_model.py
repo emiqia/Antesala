@@ -17,18 +17,26 @@ CAMBIOS DE LA REVISION METODOLOGICA (agosto 2026)
    Responden preguntas distintas y dan numeros distintos; reportar solo uno
    deja fuera la mitad del problema.
 
-2. CALIBRACION ISOTONICA. Un Random Forest promedia arboles, asi que sus
+2. CALIBRACION DE PLATT. Un Random Forest promedia arboles, asi que sus
    probabilidades se comprimen hacia el centro: casi nunca dice 5% ni 95%.
    Mientras el numero se muestre como porcentaje en pantalla ("riesgo 68%"),
    eso importa. El calibrador se ajusta FUERA DE MUESTRA (out-of-fold con
    GroupKFold por nino) y se guarda en el bundle; core/risk_model.py lo
-   aplica en inferencia. Se reporta Brier y ECE antes y despues.
+   aplica en inferencia. Se reporta Brier y ECE antes y despues. Se eligio
+   Platt sobre isotonica midiendo las dos: ver core/calibration.py.
 
 3. PANEL DE METRICAS en vez de accuracy: AUROC, AUPRC contra tasa base,
    Brier, sensibilidad, PPV, falsas alertas por nino/semana y episodios no
    detectados.
 
-4. k ESTIMADO DE LOS DATOS. El documento fija k=5 a mano; aqui se reporta
+4. MODELO INTERPRETABLE DE REFERENCIA (Seccion 8.1). Se entrena y se
+   GUARDA junto al Random Forest una regresion logistica regularizada. No es
+   solo una fila del benchmark: va en el bundle para que la interfaz pueda
+   mostrar, al lado de la cifra del modelo principal, que dice un modelo cuyos
+   coeficientes se pueden leer uno por uno. Si los dos coinciden, la cifra del
+   RF es creible; si divergen mucho, hay que mirar por que antes de confiar.
+
+5. k ESTIMADO DE LOS DATOS. El documento fija k=5 a mano; aqui se reporta
    ademas el k que sale del estimador de momentos Beta-Binomial
    (core/bayesian.estimate_prior_strength) para que el valor usado quede
    contrastado con evidencia y no solo declarado.
@@ -55,8 +63,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.isotonic import IsotonicRegression
 from sklearn.model_selection import GroupKFold
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -66,6 +75,7 @@ from core.features import (
 )
 from core.question_selector import ASKABLE_FIELDS
 from core.bayesian import K_DEFAULT, estimate_prior_strength
+from core.calibration import PlattCalibrator
 from core import evaluation as ev
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -127,9 +137,56 @@ def compute_confidence_weights(feature_importance: list[tuple[str, float]]) -> d
     }
 
 
-def _evaluar(nombre: str, feat, X, y, idx_train, idx_test) -> tuple[dict, np.ndarray, np.ndarray]:
-    """Entrena en idx_train y evalua en idx_test, devolviendo el panel."""
-    pipe = build_pipeline()
+def build_logistica() -> Pipeline:
+    """Modelo interpretable de referencia (Seccion 8.1).
+
+    Se escala porque la regularizacion L2 castiga los coeficientes en la escala
+    de cada variable: sin escalar, `dias_historial` (0-150) y `sueno_ord` (0-2)
+    reciben penalizaciones incomparables y el modelo deja de ser interpretable
+    justo en lo que se le pide.
+    """
+    num = Pipeline([
+        ("imputer", SimpleImputer(strategy="median", add_indicator=True)),
+        ("escala", StandardScaler()),
+    ])
+    cat = Pipeline([
+        ("imputer", SimpleImputer(strategy="constant", fill_value="__missing__")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False)),
+    ])
+    pre = ColumnTransformer([
+        ("num", num, FEATURE_NUMERIC),
+        ("cat", cat, FEATURE_CATEGORICAL),
+    ])
+    return Pipeline([("pre", pre), ("lr", LogisticRegression(
+        max_iter=2000, class_weight="balanced", C=1.0))])
+
+
+def coeficientes_logistica(pipe: Pipeline) -> list[tuple[str, float]]:
+    """Coeficientes ordenados por magnitud, con su signo.
+
+    Es lo que hace util al modelo de referencia: un coeficiente positivo dice
+    "mas de esto, mas riesgo", y se puede discutir con el equipo clinico
+    variable por variable. El feature importance del Random Forest no tiene
+    signo, asi que no permite esa conversacion.
+    """
+    nombres = pipe.named_steps["pre"].get_feature_names_out()
+    coefs = pipe.named_steps["lr"].coef_[0]
+    return sorted(zip(nombres.tolist(), coefs.tolist()),
+                  key=lambda t: abs(t[1]), reverse=True)
+
+
+def _evaluar(nombre: str, feat, X, y, idx_train, idx_test,
+             constructor=None) -> tuple[dict, np.ndarray, np.ndarray]:
+    """Entrena en idx_train y evalua en idx_test, devolviendo el panel.
+
+    `constructor` es la fabrica del pipeline a evaluar. Tiene que ser un
+    parametro: cuando estaba fijo a build_pipeline(), pedirle que evaluara la
+    logistica entrenaba igualmente un Random Forest y devolvia sus metricas
+    con la etiqueta equivocada -- dos modelos distintos daban exactamente el
+    mismo AUROC, AUPRC, Brier y PPV, que es imposible y era la senal de que
+    el argumento se estaba ignorando.
+    """
+    pipe = (constructor or build_pipeline)()
     pipe.fit(X.iloc[idx_train], y.iloc[idx_train])
     proba = pipe.predict_proba(X.iloc[idx_test])[:, 1]
     y_te = y.iloc[idx_test]
@@ -155,8 +212,7 @@ def _calibrador_out_of_fold(X, y, groups, n_splits: int = 5):
         p = build_pipeline()
         p.fit(X.iloc[tr], y.iloc[tr])
         oof[te] = p.predict_proba(X.iloc[te])[:, 1]
-    cal = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-    cal.fit(oof, np.asarray(y))
+    cal = PlattCalibrator().fit(oof, np.asarray(y))
     return cal, oof
 
 
@@ -178,9 +234,7 @@ def _calibracion_honesta(oof, y, groups, n_splits: int = 5):
     fuera = np.zeros(len(y), dtype=float)
     gkf = GroupKFold(n_splits=n_splits)
     for tr, te in gkf.split(oof.reshape(-1, 1), y, groups=groups):
-        c = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
-        c.fit(oof[tr], y[tr])
-        fuera[te] = c.predict(oof[te])
+        fuera[te] = PlattCalibrator().fit(oof[tr], y[tr]).predict(oof[te])
     return fuera
 
 
@@ -240,7 +294,7 @@ def train(save: bool = True, verbose: bool = True) -> dict:
 
     # --- Calibracion ---
     p("-" * 78)
-    p("CALIBRACION (isotonica, out-of-fold por nino)")
+    p("CALIBRACION (Platt, out-of-fold por nino)")
     cal, oof = _calibrador_out_of_fold(X, y, groups)
     # El calibrador que se GUARDA se ajusta con todos los datos (es el que
     # mejor generaliza), pero lo que se REPORTA se mide con un calibrador que
@@ -251,6 +305,8 @@ def train(save: bool = True, verbose: bool = True) -> dict:
     ece_antes = ev.error_calibracion_esperado(y, oof)
     ece_despues = ev.error_calibracion_esperado(y, oof_cal)
     p(f"  Brier  antes: {brier_antes:.4f}   despues: {brier_despues:.4f}")
+    p(f"  Pendiente del calibrador: {cal.pendiente:.3f}  "
+      f"({'separa mas' if cal.pendiente > 1 else 'acerca al centro'})")
     p(f"  ECE    antes: {ece_antes:.4f}   despues: {ece_despues:.4f}")
     p("  (ECE = brecha media entre lo que el modelo dice y lo que ocurre;")
     p("   medido con un calibrador que no vio estas filas)")
@@ -285,8 +341,31 @@ def train(save: bool = True, verbose: bool = True) -> dict:
     # clinicos manuales del score heuristico (Seccion 6.1).
     confidence_weights = compute_confidence_weights(feature_importance)
 
+    # --- Modelo interpretable de referencia (Seccion 8.1) ---
+    logistica = build_logistica()
+    logistica.fit(X, y)
+    coefs = coeficientes_logistica(logistica)
+    m_log, _, _ = _evaluar("logistica", feat, X, y, tr_n, te_n,
+                           constructor=build_logistica)
+    p("-" * 78)
+    p("MODELO INTERPRETABLE DE REFERENCIA (Seccion 8.1)")
+    p(ev.CABECERA_PANEL)
+    p(ev.formato_panel("Random Forest", m_ninos))
+    p(ev.formato_panel("logistica (referencia)", m_log))
+    p("")
+    p("Coeficientes con mayor peso (signo = direccion del efecto):")
+    for nombre, c in coefs[:10]:
+        p(f"  {nombre:<48s} {c:+.3f}")
+
     bundle = {
         "pipeline": final_pipe,
+        # Referencia interpretable: se despliega junto al modelo principal para
+        # poder contrastar las dos cifras en pantalla (Seccion 8.1).
+        "referencia": {
+            "pipeline": logistica,
+            "coeficientes": coefs,
+            "metrics": m_log,
+        },
         "calibrator": cal,
         "mu": mu,
         "feature_numeric": FEATURE_NUMERIC,
@@ -304,6 +383,7 @@ def train(save: bool = True, verbose: bool = True) -> dict:
             "calibracion": {"brier_antes": brier_antes, "brier_despues": brier_despues,
                             "ece_antes": ece_antes, "ece_despues": ece_despues},
             "k_estimado": (k_est or {}).get("k"),
+            "referencia_auroc": m_log["auroc"],
             # Alias planos que ya consumia la interfaz.
             "roc_auc": m_ninos["auroc"],
             "average_precision": m_ninos["auprc"],

@@ -1,0 +1,106 @@
+"""
+Prueba de humo de la interfaz completa, sin navegador.
+
+POR QUE EXISTE
+Los tests de `core/` verifican el motor, pero la interfaz es donde se juntan
+todas las piezas -- y donde un renombre a medio aplicar (una variable que ya no
+existe, una clave de diccionario que cambio) revienta la pantalla sin que
+ningun test de core se entere. Comprobarlo a mano en Chrome es lento y, en esta
+maquina, poco fiable: el renderer se cuelga con la pagina cargada aunque el
+servidor de Streamlit este ocioso y respondiendo 200.
+
+AppTest ejecuta el script de la app en el mismo proceso, con su runtime real,
+y expone las excepciones que se hayan producido. Es la verificacion que de
+verdad responde "¿se cae la app?".
+"""
+from pathlib import Path
+
+import pytest
+
+from streamlit.testing.v1 import AppTest
+
+# Ruta absoluta: AppTest resuelve las rutas relativas contra el archivo que la
+# llama, no contra el directorio de trabajo, asi que "app.py" apuntaria a
+# tests/app.py.
+APP = Path(__file__).resolve().parents[1] / "app.py"
+
+TIMEOUT = 180
+VISTAS = ["👪  Hoy · familia", "🩺  Panel del equipo", "📝  Bitácora completa"]
+
+
+def _correr(vista: str | None = None) -> AppTest:
+    """Renderiza la app con una vista fija, en UN solo run().
+
+    No se usa `at.segmented_control[0].set_value(...).run()` porque el segundo
+    run obliga a AppTest a reconstruir el estado de todos los widgets, y ahi
+    tropieza con el selectbox del consultante: AppTest no conserva su
+    `format_func`, asi que busca el valor crudo ('nino_001') dentro de la lista
+    de etiquetas formateadas ('Amelia S. - 150 dias') y lanza ValueError. Es una
+    limitacion del arnes de pruebas, no de la app.
+
+    Sembrar session_state antes del primer run evita el problema entero y ademas
+    es mas rapido: una sola pasada por vista.
+    """
+    at = AppTest.from_file(str(APP), default_timeout=TIMEOUT)
+    if vista is not None:
+        at.session_state["vista"] = vista
+    at.run()
+    return at
+
+
+def _sin_excepciones(at: AppTest, contexto: str) -> None:
+    if at.exception:
+        detalle = "\n".join(str(e.value) for e in at.exception)
+        pytest.fail(f"la app lanzo una excepcion en {contexto}:\n{detalle}")
+
+
+def test_la_app_arranca_sin_excepciones():
+    _sin_excepciones(_correr(), "el arranque")
+
+
+@pytest.mark.parametrize("vista", VISTAS)
+def test_cada_vista_renderiza(vista):
+    """Las tres vistas se dibujan enteras. Cubre en particular el panel del
+    equipo, que es el bloque mas grande y el que mas piezas nuevas junta:
+    trazabilidad de recomendaciones, exclusiones y el agregado de seguimiento."""
+    _sin_excepciones(_correr(vista), f"la vista {vista!r}")
+
+
+def test_el_panel_del_equipo_muestra_la_trazabilidad():
+    """Seccion 12: de cada sugerencia se tiene que poder ver de donde sale."""
+    at = _correr("🩺  Panel del equipo")
+    _sin_excepciones(at, "el panel del equipo")
+    texto = " ".join(m.value for m in at.markdown)
+    assert "De dónde sale cada sugerencia" in texto
+
+
+def test_el_panel_del_equipo_muestra_el_seguimiento():
+    """Seccion 13: el agregado de "que ocurrio despues" existe aunque todavia
+    no haya ningun seguimiento registrado (en ese caso, explicando como se
+    registra en vez de mostrar una tabla vacia)."""
+    at = _correr("🩺  Panel del equipo")
+    _sin_excepciones(at, "el panel del equipo")
+    texto = " ".join(m.value for m in at.markdown)
+    assert "Qué ocurrió después" in texto
+
+
+def test_la_vista_familia_ofrece_registrar_el_resultado():
+    """Seccion 13, lado de captura: el formulario "¿Que ocurrio despues?" tiene
+    que estar en la pantalla de la familia, que es quien lo sabe."""
+    at = _correr("👪  Hoy · familia")
+    _sin_excepciones(at, "la vista de familia")
+    etiquetas = [e.label for e in at.expander]
+    assert any("¿Qué ocurrió después?" in e for e in etiquetas)
+
+
+def test_no_queda_la_palabra_confianza_en_la_interfaz():
+    """Regresion de la revision metodologica: lo que se muestra es un indice de
+    suficiencia de informacion, no una confianza estadistica. Si la palabra
+    reaparece en pantalla, el renombre se quedo a medias."""
+    for vista in VISTAS:
+        at = _correr(vista)
+        _sin_excepciones(at, f"la vista {vista!r}")
+        piezas = [m.value for m in at.markdown]
+        piezas += [c.value for c in at.caption]
+        texto = " ".join(piezas).lower()
+        assert "confianza" not in texto, f"aparece 'confianza' en {vista!r}"

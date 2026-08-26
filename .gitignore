@@ -5,3 +5,11 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+
+# Base de demo del registro de intervenciones (Seccion 13): estado local,
+# no codigo. Se recrea sola al abrir la app.
+data/antesala.db
+
+# Material entregado por Bluba: muestra anonimizada de datos reales, bases
+# del desafio y presentaciones. Se conserva en local, NO se publica.
+docs/

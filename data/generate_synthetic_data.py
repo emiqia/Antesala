@@ -4,9 +4,14 @@ Generador de datos sinteticos para Antesala, alineado al ESQUEMA REAL de Bluba.
 A diferencia de la primera version (que usaba nombres de variable inventados
 a partir de la lista abstracta de la Seccion 4.1 del documento tecnico), este
 generador usa los nombres de campo y las categorias EXACTAS observadas en:
-  - docs/Datos base/4_seguimiento_diario_tutor.csv  (bitacora diaria del tutor)
-  - docs/Datos base/5_eventos_desregulacion_tutor.csv (registro de episodios)
-  - las capturas de pantalla de la app movil de Bluba (docs/5. Presentacion BLUBA.pdf)
+  - la tabla de seguimiento diario del tutor  (bitacora diaria)
+  - la tabla de eventos de desregulacion del tutor (registro de episodios)
+  - las capturas de pantalla de la app movil de Bluba
+
+Esas fuentes son la muestra anonimizada y las presentaciones que entrego la
+empresa. NO estan versionadas en este repositorio: viven en docs/, que esta
+excluido. El generador no las lee en tiempo de ejecucion -- solo se usaron para
+fijar los nombres de campo y las categorias, que quedaron escritos mas abajo.
 
 Bitacora diaria ("Mi Dia - Estado Basal" en la app):
   - calidad_sueno: Reparador / Interrumpido / Dificultad de Conciliacion
@@ -77,7 +82,7 @@ SOURCES = ["familia", "escuela", "terapeuta"]
 # --- Variables de la Seccion 4.1 que no estaban en la muestra de datos reales
 # (esa muestra solo cubria la pantalla "Mi Dia" del tutor). Se modelan segun la
 # descripcion de las bases del desafio. ESTADO_ALERTA reutiliza las categorias
-# EXACTAS observadas en docs/Datos base/3_sesiones_profesionales.csv.
+# EXACTAS observadas en la tabla de sesiones profesionales de Bluba.
 NIVEL_APOYO = ["Bajo", "Medio", "Alto"]
 CAMBIOS_ALIMENTACION = ["Sin cambios", "Menor apetito", "Selectividad aumentada"]
 CAMBIOS_RUTINA = ["No", "Si"]
@@ -91,12 +96,12 @@ ALIMENTACION_RECREOS = ["Normal", "Reducida", "Rechaza"]
 # Las bases oficiales describen la informacion como procedente de "la
 # bitacora diaria Y observaciones terapeuticas/escolares" -- hasta ahora solo
 # se modelaba la bitacora del tutor. Categorias EXACTAS observadas en
-# docs/Datos base/3_sesiones_profesionales.csv.
+# la tabla de sesiones profesionales de Bluba.
 PROFESIONES_SESION = ["Terapeuta Ocupacional", "Fonoaudiologo", "Psicopedagogo"]
 NIVEL_ALERTA_SESION = ["Optimo (Regulado)", "Calmado", "Alto (Sobreexcitado)", "Bajo (Letargico)"]
 P_SESION_HOY = 0.18  # aprox. 1 sesion cada 5-6 dias por nino
 
-# Perfiles diagnosticos reales observados en docs/Datos base/1_casos_anonimizados.csv.
+# Perfiles diagnosticos observados en la muestra anonimizada de casos.
 DIAGNOSTICOS = ["Trastorno del Espectro Autista (TEA)"]
 PERFILES_SENSORIALES = [
     "Buscador Sensorial Vestibular y Propioceptivo",

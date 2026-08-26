@@ -2,7 +2,8 @@
 Ingenieria de variables (feature engineering) - Seccion 4.3 del documento tecnico.
 
 Trabaja sobre el ESQUEMA REAL de campos de Bluba (ver
-data/generate_synthetic_data.py y docs/Datos base/*.csv), no sobre nombres
+data/generate_synthetic_data.py y la muestra anonimizada entregada por
+Bluba, no versionada), no sobre nombres
 inventados: bitacora diaria del tutor (calidad_sueno, modo_despertar,
 adherencia_medicacion, estado_gastrointestinal, nivel_regulacion_general_dia)
 mas el agregado diario de eventos de desregulacion (n_eventos_desregulacion,
@@ -59,12 +60,13 @@ RAW_NUMERIC = ["n_eventos_desregulacion", "intensidad_max_desregulacion", "inten
 
 # Categoricas (el pipeline las imputa y codifica; aqui se dejan como texto/NaN).
 # Las primeras 5 + los campos de evento vienen de la bitacora real de Bluba
-# (docs/Datos base/*.csv). Las siguientes 8 completan el listado de variables
+# (muestra anonimizada de Bluba, no versionada). Las siguientes 8 completan
+# el listado de variables
 # de la Seccion 4.1 del documento tecnico que no estaban en la muestra de
 # datos reales disponible (esa muestra solo cubria la pantalla "Mi Dia" del
 # tutor); se modelan segun la descripcion de las bases, y estado_alerta
 # reutiliza las categorias reales observadas en las sesiones profesionales
-# (docs/Datos base/3_sesiones_profesionales.csv).
+# (tabla de sesiones profesionales de la muestra de Bluba).
 RAW_CATEGORICAL = [
     "calidad_sueno",
     "modo_despertar",

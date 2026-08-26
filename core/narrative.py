@@ -45,7 +45,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .recommendations import RECOMMENDATIONS, DEFAULT_RECOMMENDATION, VARIABLE_LABELS
+from .recommendations import (
+    BIBLIOTECA, RECOMMENDATIONS, DEFAULT_RECOMMENDATION, VARIABLE_LABELS)
 
 # Ventana por defecto: "durante los ultimos tres dias" del ejemplo de las bases.
 VENTANA_DIAS = 3
@@ -344,15 +345,27 @@ def _nivel(risk: float) -> str:
     return "bajo"
 
 
-def _acciones(senales: list[Signal], drivers: list[str], maximo: int = 3) -> list[str]:
+def _acciones(senales: list[Signal], drivers: list[str], maximo: int = 3,
+              excluidas: set[str] | None = None) -> list[str]:
     """Estrategias preventivas, en el mismo orden de prioridad que las senales.
-    Reutiliza la tabla driver -> accion de core/recommendations.py (Seccion 7)."""
+    Reutiliza la biblioteca auditable de core/recommendations.py (Seccion 12).
+
+    `excluidas` son ids de recomendacion apagadas para este nino (Seccion 19).
+    El filtro se aplica AQUI y no en la interfaz: una estrategia que la familia
+    o el equipo tratante descartaron no debe llegar siquiera al parrafo que se
+    genera, o reaparece en el texto aunque la pantalla no la liste.
+    """
+    excluidas = excluidas or set()
     orden = [s.key for s in senales] + [d for d in drivers if d not in {s.key for s in senales}]
     acciones: list[str] = []
     for key in orden:
-        accion = RECOMMENDATIONS.get(key)
-        if accion and accion not in acciones:
-            acciones.append(accion)
+        entrada = BIBLIOTECA.get(key)
+        if entrada is None:
+            continue
+        if entrada.excluible and entrada.id in excluidas:
+            continue
+        if entrada.accion not in acciones:
+            acciones.append(entrada.accion)
         if len(acciones) >= maximo:
             break
     return acciones
@@ -370,6 +383,7 @@ def build_narrative(
     ventana: int = VENTANA_DIAS,
     max_senales: int = 3,
     pregunta_pendiente: str | None = "auto",
+    excluidas: set[str] | None = None,
 ) -> Narrative:
     """Redacta la explicacion del riesgo en el formato de las bases.
 
@@ -451,7 +465,7 @@ def build_narrative(
                       "histórica, no de un cambio observado en estos días.")
 
     # --- Frase 3: la sugerencia ---------------------------------------------
-    acciones = _acciones(top, drivers)
+    acciones = _acciones(top, drivers, excluidas=excluidas)
     if pregunta_pendiente == "auto":
         pregunta_pendiente = getattr(result, "suggested_question", None)
     etiqueta_pendiente = VARIABLE_LABELS.get(pregunta_pendiente) if pregunta_pendiente else None

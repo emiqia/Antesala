@@ -20,7 +20,8 @@ misma persona ni necesitan la misma pantalla:
     predictivas y tendencia.
   - "Bitacora completa": las 14 variables de la Seccion 4.1, opcional.
 
-Estetica alineada a la app real de Bluba (docs/5. Presentacion BLUBA.pdf):
+Estetica alineada a la app real de Bluba (capturas de la presentacion
+entregada por la empresa; material no versionado):
 fondo lavanda claro, morado corporativo, tarjetas blancas redondeadas,
 opciones como tarjetas seleccionables con punto de color.
 
@@ -37,7 +38,10 @@ import streamlit as st
 
 from core.narrative import (ETIQUETA_ORIGEN, UMBRAL_ELEVADO, UMBRAL_MODERADO,
                             build_narrative)
-from core.recommendations import VARIABLE_LABELS
+from core.recommendations import (
+    VARIABLE_LABELS, BIBLIOTECA, recomendaciones_activadas)
+from core.explanation import explicar, resumen_texto
+from core import intervention_log as seguimiento
 from core.risk_model import load_model, predict_risk
 from core.question_selector import (
     REGISTRO_COSTO, REGISTRO_COSTO_DETALLE, INFORMANTE_FAMILIA, LAMBDA_CARGA)
@@ -528,6 +532,67 @@ def bloque_certeza(suf_pct: int, nivel: str, incert: dict | None) -> str:
     return html
 
 
+def bloque_seguimiento(child_id: str, result) -> None:
+    """Formulario "¿Qué ocurrió después?" (Seccion 13).
+
+    Va colapsado a proposito: es una pregunta sobre AYER y no debe competir con
+    la pregunta del dia, que es lo unico que la app pide hoy. Abrirlo por
+    defecto convertiria la reduccion de carga en una promesa incumplida en la
+    misma pantalla que la anuncia.
+    """
+    hoy_iso = pd.Timestamp.today().normalize().date().isoformat()
+    previo = seguimiento.seguimiento_de(child_id, hoy_iso) or {}
+    ya = bool(previo)
+
+    with st.expander("📋  ¿Qué ocurrió después?" + ("  ·  registrado" if ya else ""),
+                     expanded=False):
+        st.caption("Cerrar el círculo: el sistema no puede aprender qué apoyo sirve "
+                   "si nadie le cuenta cómo terminó el día.")
+
+        def _idx(campo):
+            v = previo.get(campo)
+            return None if v is None else (0 if v == 1 else 1)
+
+        hubo = st.radio("¿Apareció una desregulación?", [1, 0], index=_idx("hubo_desregulacion"),
+                        format_func=lambda v: "Sí" if v else "No",
+                        horizontal=True, key=f"seg_hubo_{child_id}")
+        apoyo = st.selectbox("¿Qué apoyo se utilizó?", seguimiento.APOYOS,
+                             index=(seguimiento.APOYOS.index(previo["apoyo_usado"])
+                                    if previo.get("apoyo_usado") in seguimiento.APOYOS else 0),
+                             key=f"seg_apoyo_{child_id}")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            acept = st.radio("¿Fue aceptado?", [1, 0], index=_idx("fue_aceptado"),
+                             format_func=lambda v: "Sí" if v else "No",
+                             key=f"seg_acep_{child_id}")
+        with c2:
+            util = st.radio("¿Pareció útil?", [1, 0], index=_idx("parecio_util"),
+                            format_func=lambda v: "Sí" if v else "No",
+                            key=f"seg_util_{child_id}")
+        with c3:
+            dific = st.radio("¿Generó dificultades?", [1, 0], index=_idx("genero_dificultades"),
+                             format_func=lambda v: "Sí" if v else "No",
+                             key=f"seg_dif_{child_id}")
+        notas = st.text_area("Notas (opcional)", value=previo.get("notas") or "",
+                             key=f"seg_notas_{child_id}", height=68,
+                             help="No escriba nombres ni datos personales: este registro "
+                                  "guarda solo el identificador del niño (Sección 19, "
+                                  "minimización de datos).")
+
+        if st.button("Guardar seguimiento", type="primary", width="stretch",
+                     key=f"seg_btn_{child_id}"):
+            activadas = recomendaciones_activadas(result.drivers, excluidas)
+            seguimiento.registrar(seguimiento.Seguimiento(
+                child_id=child_id, fecha=hoy_iso,
+                riesgo_estimado=result.risk, suficiencia=result.sufficiency,
+                recomendaciones=",".join(r.id for r in activadas) or None,
+                hubo_desregulacion=hubo, apoyo_usado=apoyo, fue_aceptado=acept,
+                parecio_util=util, genero_dificultades=dific,
+                notas=notas.strip() or None))
+            st.success("Seguimiento guardado.")
+            st.rerun()
+
+
 def chips(senales, limite: int = 6) -> str:
     if not senales:
         return f"<div style='color:{MUTED}; font-size:13px;'>Sin señales de riesgo en la ventana.</div>"
@@ -740,7 +805,7 @@ with st.sidebar:
     default_idx = (children.index(st.session_state["_select_child"])
                    if st.session_state.get("_select_child") in children else 0)
     child_id = st.selectbox("Consultante", children, index=default_idx,
-                            format_func=etiqueta_selector)
+                            format_func=etiqueta_selector, key="consultante")
 
     n_hist = dias_por_nino.get(child_id, 0)
     if n_hist >= UMBRAL_HISTORIAL_CORTO:
@@ -797,6 +862,10 @@ nombre = display_name(child_id)
 # preguntas. Una vez respondida, el flujo se cierra aunque queden variables sin
 # registrar -- ese es el requisito de REDUCIR LA CARGA de las bases.
 ya_respondio = bool(answers.get("_question_answered"))
+
+# Recomendaciones apagadas para este nino (Seccion 19). Se leen antes de armar
+# la narrativa para que una estrategia excluida no llegue nunca a la pantalla.
+excluidas = set(seguimiento.exclusiones_de(child_id))
 question = None if ya_respondio else result.suggested_question
 
 risk_pct = int(round(result.risk * 100))
@@ -806,9 +875,12 @@ suf_pct = int(round(result.sufficiency * 100))
 nivel = nivel_de(result.risk)
 color_riesgo = NIVEL_COLOR[nivel]
 
+# key="vista" para poder fijar la vista desde session_state sin simular un
+# clic: es lo que permite que tests/test_app_smoke.py renderice las tres
+# pantallas en un solo run() cada una.
 vista = st.segmented_control(
     "Vista", ["👪  Hoy · familia", "🩺  Panel del equipo", "📝  Bitácora completa"],
-    default="👪  Hoy · familia", label_visibility="collapsed")
+    default="👪  Hoy · familia", label_visibility="collapsed", key="vista")
 vista = vista or "👪  Hoy · familia"
 
 
@@ -826,7 +898,8 @@ if vista.startswith("👪"):
 </div>""", unsafe_allow_html=True)
 
             narrativa = build_narrative(logs, child_id, today_dict, result,
-                                        nombre=nombre, pregunta_pendiente=question)
+                                        nombre=nombre, pregunta_pendiente=question,
+                                        excluidas=excluidas)
 
             # Riesgo y suficiencia son numeros independientes (Seccion 6.2):
             # "un riesgo alto con informacion insuficiente no debe presentarse a
@@ -974,6 +1047,14 @@ if vista.startswith("👪"):
                     st.session_state.answers[child_id] = {}
                     st.rerun()
 
+            # --- "Que ocurrio despues?" (Seccion 13) -------------------------
+            # Sin esto Antesala es un sistema de una sola direccion: predice,
+            # sugiere, y nunca se entera de si sirvio. Ademas es el unico modo
+            # de generar el dato aviso -> apoyo -> resultado, que no existe en
+            # la bitacora de Bluba y que hara falta para las fases 3 y 4 de la
+            # validacion (Seccion 17).
+            bloque_seguimiento(child_id, result)
+
     # ------------------------- Detras de la pantalla ------------------------
     with col_detras:
         n_filas = f"{len(logs):,}".replace(",", ".")
@@ -1006,6 +1087,57 @@ if vista.startswith("👪"):
   <div style="font-size:12px; color:{MUTED}; margin-top:8px;">
     Cada señal indica de qué fuente viene (familia, colegio o equipo profesional)
     y en cuántos días de la ventana aparece.
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # 1b. Que del dia de hoy movio la cifra (Seccion 11: explicabilidad
+        #     LOCAL). El feature importance global vive mas abajo y responde
+        #     otra pregunta: que importa en promedio, no que paso hoy.
+        contribuciones = explicar(logs, child_id, today_dict, load_model())
+        if contribuciones:
+            _rel = [c for c in contribuciones if c.direccion != "neutro"]
+            filas_contrib = ""
+            for c in contribuciones[:6]:
+                if c.direccion == "riesgo":
+                    col, flecha = CRITICAL, "▲"
+                elif c.direccion == "protector":
+                    col, flecha = GOOD, "▼"
+                else:
+                    col, flecha = MUTED, "="
+                # "neutro" tiene DOS causas distintas y decir lo mismo de las
+                # dos es afirmar algo falso: que el valor de hoy coincide con
+                # el habitual cuando en realidad solo pasa que el modelo
+                # apenas reacciona a la diferencia.
+                if c.es_habitual:
+                    pts = "igual que de costumbre"
+                elif c.direccion == "neutro":
+                    pts = "distinto, pero no mueve la cifra"
+                else:
+                    pts = f"{flecha} {abs(c.contribucion):.0%}"
+                filas_contrib += (
+                    f'<div style="display:flex;justify-content:space-between;'
+                    f'align-items:baseline;gap:10px;padding:5px 0;'
+                    f'border-bottom:1px solid {BORDER};">'
+                    f'<div style="font-size:13px;color:{INK};">'
+                    f'{_feature_label(c.campo)}'
+                    f'<span style="color:{MUTED};font-size:11px;"> · hoy '
+                    f'{c.valor} · habitual {c.valor_habitual}</span></div>'
+                    f'<div style="font-size:13px;font-weight:700;color:{col};'
+                    f'white-space:nowrap;">{pts}</div></div>')
+            st.markdown(f"""
+<div class="card">
+  <div class="eyebrow">1b · Qué del día de hoy movió la cifra</div>
+  <div class="h-sub" style="margin-top:0;">Para cada dato registrado, cuánto cambiaría
+     el riesgo si esa variable estuviera en el valor <b>habitual de este niño</b>.
+     Es una atribución contra su propia línea base, no el <i>feature importance</i>
+     global — que dice qué importa en promedio, no qué pasó hoy.</div>
+  <div style="margin-top:10px;">{filas_contrib}</div>
+  <div style="font-size:11.5px;color:{MUTED};margin-top:9px;line-height:1.5;">
+    ▲ empuja el riesgo hacia arriba respecto de lo normal en él · ▼ lo empuja hacia
+    abajo · «igual que de costumbre» = hoy coincide con su valor habitual ·
+    «no mueve la cifra» = hoy es distinto, pero el modelo apenas reacciona
+    (menos de 1 punto). Se mide una variable a la vez, así que las contribuciones
+    <b>no suman</b> el riesgo total. Describe lo que el modelo usa, no una causa.
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -1211,7 +1343,8 @@ elif vista.startswith("🩺"):
                    "estar incompleto. La lista de la izquierda usa el último día ya cerrado "
                    "de cada consultante, por eso las cifras pueden diferir.")
         narrativa_pro = build_narrative(logs, child_id, today_dict, result, nombre=nombre,
-                                        audiencia="profesional", pregunta_pendiente=question)
+                                        audiencia="profesional", pregunta_pendiente=question,
+                                        excluidas=excluidas)
         st.markdown(f"""
 <div class="card">
   <div style="font-size:14px; color:{INK}; line-height:1.7;">{narrativa_pro.texto}</div>
@@ -1296,12 +1429,102 @@ elif vista.startswith("🩺"):
                                            gridcolor="rgba(139,137,163,.22)"),
                                 yaxis=dict(title=None), font=dict(color=INK_SOFT))
             st.plotly_chart(fig_i, config={"displayModeBar": False})
+            _ref = (load_model() or {}).get("referencia") or {}
+            if _ref.get("metrics"):
+                _m = _ref["metrics"]
+                st.caption(
+                    f"Modelo interpretable de referencia (Sección 8.1): una regresión "
+                    f"logística regularizada sobre las mismas variables alcanza AUROC "
+                    f"**{_m['auroc']:.3f}** frente a **{(load_model() or {}).get('metrics', {}).get('roc_auc', 0):.3f}** "
+                    f"del Random Forest. Se despliega junto al modelo principal para "
+                    f"poder contrastar las dos cifras: si coinciden, la del bosque es "
+                    f"creíble; si divergen mucho, hay que mirar por qué antes de confiar.")
             st.caption("Feature importance del Random Forest entrenado. Estos mismos pesos "
                        "son los que determinan cuánto aporta cada variable al índice de "
                        "suficiencia "
                        "(Sección 6.2).")
         else:
             st.info("Entrena el modelo (`python core/train_model.py`) para ver este panel.")
+
+    # ---------- Trazabilidad de la recomendacion (Secciones 12 y 19) ----------
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    st.markdown("##### De dónde sale cada sugerencia")
+    activadas = recomendaciones_activadas(result.drivers, excluidas)
+    apagadas = [BIBLIOTECA[d] for d in result.drivers
+                if d in BIBLIOTECA and BIBLIOTECA[d].excluible
+                and BIBLIOTECA[d].id in excluidas]
+
+    if not activadas and not apagadas:
+        st.info("Hoy no se activó ninguna regla de la biblioteca: no hay ninguna "
+                "variable suficientemente fuera de la línea base de este niño.")
+    else:
+        st.caption(f"La biblioteca tiene {len(BIBLIOTECA)} entradas. Ninguna es un texto "
+                   f"generado: cada una declara su condición de activación, su contexto "
+                   f"y quién responde por ella (Sección 12). Ninguna ha sido revisada "
+                   f"todavía por el equipo clínico de Bluba — eso es un dato del sistema, "
+                   f"no un descuido.")
+        for r in activadas:
+            revisada = r.estado_revision == "revisada"
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='display:flex;justify-content:space-between;gap:10px;"
+                    f"align-items:baseline;'>"
+                    f"<b style='color:{INK};'>{r.id} · {_feature_label(r.driver)}</b>"
+                    f"<span style='font-size:11px;font-weight:700;"
+                    f"color:{GOOD if revisada else WARNING};'>"
+                    f"{'revisada' if revisada else 'sin revisión clínica'}</span></div>"
+                    f"<div style='font-size:13.5px;color:{INK};margin-top:6px;'>"
+                    f"Sugiere: {r.accion}.</div>"
+                    f"<div style='font-size:12px;color:{INK_SOFT};margin-top:6px;'>"
+                    f"<b>Se activa cuando:</b> {r.condicion}</div>"
+                    f"<div style='font-size:12px;color:{INK_SOFT};margin-top:3px;'>"
+                    f"<b>Contexto:</b> {r.contexto}</div>"
+                    f"<div style='font-size:11px;color:{MUTED};margin-top:5px;'>"
+                    f"Fuente: {r.fuente}</div>",
+                    unsafe_allow_html=True)
+                if r.excluible:
+                    if st.button(f"No usar esta estrategia con {nombre}",
+                                 key=f"excl_{r.id}_{child_id}"):
+                        seguimiento.excluir(child_id, r.id,
+                                            "Excluida desde el panel del equipo")
+                        st.rerun()
+                else:
+                    st.caption("Esta entrada no se puede excluir: verificar la "
+                               "administración de un medicamento y derivar al equipo "
+                               "tratante son canales de seguridad, no preferencias.")
+
+        for r in apagadas:
+            with st.container(border=True):
+                st.markdown(
+                    f"<div style='color:{MUTED};font-size:13px;'>"
+                    f"<b>{r.id} · {_feature_label(r.driver)}</b> — excluida para "
+                    f"{nombre}. Se activó hoy, pero no se muestra a la familia.</div>",
+                    unsafe_allow_html=True)
+                if st.button("Volver a usarla", key=f"rest_{r.id}_{child_id}"):
+                    seguimiento.restaurar(child_id, r.id)
+                    st.rerun()
+
+    # ---------- Que apoyo parece funcionar (Seccion 13) ----------------------
+    resumen = seguimiento.resumen_por_apoyo(child_id)
+    st.markdown("##### Qué ocurrió después")
+    if resumen.empty:
+        st.info("Todavía no hay seguimientos registrados para este consultante. "
+                "Se registran desde la vista **Hoy · familia**, en «¿Qué ocurrió "
+                "después?». Es el dato que hoy no existe en ninguna bitácora: qué "
+                "hizo el adulto tras el aviso y cómo terminó el día.")
+    else:
+        st.dataframe(
+            resumen.rename(columns={
+                "apoyo_usado": "apoyo", "veces": "veces",
+                "desregulaciones": "% con desregulación", "aceptado": "% aceptado",
+                "parecio_util": "% pareció útil", "dio_problemas": "% dio problemas"}),
+            width="stretch", hide_index=True)
+        st.caption("⚠️ Esto es una **tabulación descriptiva, no evidencia de "
+                   "efectividad**. Los apoyos no se asignan al azar: se eligen "
+                   "justamente en los días que pintan peor, así que el apoyo que "
+                   "aparezca con más desregulaciones puede ser el que se usa en los "
+                   "días más difíciles, no el que funciona peor. Separar una cosa de "
+                   "la otra requiere un diseño prospectivo (Sección 17, fase 4).")
 
     with st.expander("Ver detalle técnico de la predicción actual"):
         st.json({

@@ -10,8 +10,13 @@ archivo de codigo que la implementa hoy (no es un diagrama aspiracional: las
 Uso:
     python scripts/generate_architecture_diagram.py
 
-Genera docs/arquitectura_pipeline.png (para insertar en slides) y
-docs/arquitectura_pipeline.svg (vectorial, editable).
+Genera assets/arquitectura_pipeline.png (para insertar en slides) y
+assets/arquitectura_pipeline.svg (vectorial, editable).
+
+Escribe en assets/ y no en docs/: docs/ contiene el material entregado por
+Bluba (datos anonimizados reales, bases del desafio, presentaciones) y NO se
+versiona. Si este script escribiera ahi, `mkdir(exist_ok=True)` recrearia la
+carpeta excluida cada vez que alguien lo corriera.
 """
 from pathlib import Path
 
@@ -19,7 +24,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch, Circle
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT_DIR = ROOT / "docs"
+OUT_DIR = ROOT / "assets"
 
 PURPLE = "#6b4ec7"
 PURPLE_DARK = "#4a3aa7"

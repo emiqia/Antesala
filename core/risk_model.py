@@ -1,7 +1,20 @@
 """
-Motor de riesgo (nivel de respaldo) y calculo de confianza.
-Seccion 6.1 (score heuristico ponderado) y Seccion 6.2 (nivel de confianza)
-del documento tecnico.
+Motor de riesgo (nivel de respaldo) e INDICE DE SUFICIENCIA DE INFORMACION.
+Seccion 6.1 (score heuristico ponderado) y Seccion 6.2 del documento tecnico.
+
+Nomenclatura corregida tras la revision metodologica de agosto 2026: lo que
+antes se llamaba "confianza" NO es la probabilidad de que la prediccion sea
+correcta. Es cuanta de la informacion relevante esta disponible hoy
+(completitud x historial). Un registro completo y mucho historial no implican
+que el modelo este seguro. Por eso el sistema reporta TRES numeros separados:
+
+    riesgo        p(episodio de desregulacion en 24 h)   -- este modulo
+    suficiencia   cuanta informacion respalda esa cifra  -- este modulo
+    incertidumbre que tan estable es la prediccion       -- core/uncertainty.py
+
+En la interfaz la suficiencia se sigue condensando en alta/moderada/baja
+porque es lo legible para una familia, pero el nombre y la definicion son los
+de un indice de suficiencia, no los de una confianza estadistica.
 
 Este es el "Nivel 1 - garantizado" del roadmap (Seccion 3.7): no requiere
 entrenar ningun modelo, corre en milisegundos, y es completamente explicable.
@@ -14,7 +27,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from .bayesian import compute_all_baselines, history_confidence_factor, K_DEFAULT
+from .bayesian import compute_all_baselines, history_factor, K_DEFAULT
 
 MODEL_PATH = Path(__file__).resolve().parents[1] / "models" / "antesala_rf.joblib"
 _MODEL_CACHE: dict | None = None
@@ -85,16 +98,43 @@ _SLEEP_ORDINAL = {"Reparador": 2.0, "Interrumpido": 1.0, "Dificultad de Concilia
 @dataclass
 class RiskResult:
     child_id: str
-    risk: float                     # 0-1
-    confidence: float                # 0-1
-    confidence_level: str            # "baja" | "moderada" | "alta"
+    risk: float                     # 0-1: p(desregulacion en 24 h)
+    sufficiency: float               # 0-1: indice de suficiencia de informacion
+    sufficiency_level: str           # "baja" | "moderada" | "alta"
     drivers: list[str] = field(default_factory=list)
     missing_relevant: list[str] = field(default_factory=list)
     n_history_days: int = 0
     model_used: str = "heuristico"   # "random_forest" | "heuristico"
     base_rate_bayes: float | None = None  # linea base bayesiana de riesgo (theta_crisis_rate)
     suggested_question: str | None = None  # "la pregunta del dia" (Seccion 6.3)
-    question_method: str | None = None     # "reduccion_varianza" | "heuristico"
+    # "reduccion_varianza" | "heuristico" | "sin_pregunta_util".
+    # "sin_pregunta_util" = hay datos faltantes, pero ninguno mejora la
+    # estimacion de hoy, asi que el sistema decide NO preguntar nada.
+    question_method: str | None = None
+    # Reduccion esperada de varianza de CADA variable candidata, no solo de la
+    # ganadora: el selector ya las calcula todas para elegir el argmax, asi que
+    # exponerlas no cuesta nada y permite mostrar el ranking completo en la
+    # interfaz (sin recalcularlo por segunda vez).
+    question_scores: dict[str, float] = field(default_factory=dict)
+    # Utilidad neta de cada pregunta candidata: ganancia informativa MENOS
+    # carga de registro (Seccion 6.3 revisada). Es lo que se ordena de verdad
+    # para elegir la pregunta; question_scores guarda solo la ganancia bruta.
+    question_utilities: dict[str, float] = field(default_factory=dict)
+    # Incertidumbre predictiva (core/uncertainty.py). Deliberadamente NO se
+    # fusiona con `sufficiency`: son dos preguntas distintas.
+    uncertainty: dict = field(default_factory=dict)
+
+    # --- Alias retrocompatibles -------------------------------------------
+    # El nombre "confidence" es justamente el que la revision metodologica
+    # pidio no usar, pero hay codigo y tests que ya lo referencian. Se
+    # mantiene como propiedad de solo lectura.
+    @property
+    def confidence(self) -> float:
+        return self.sufficiency
+
+    @property
+    def confidence_level(self) -> str:
+        return self.sufficiency_level
 
 
 def _sigmoid(x: float) -> float:
@@ -110,12 +150,12 @@ def score_heuristic(
 ) -> RiskResult:
     """Calcula el score heuristico ponderado (Seccion 6.1, nivel de respaldo)
     comparando el registro de `today` contra la linea base ajustada (theta_i)
-    de cada nino, y el nivel de confianza (Seccion 6.2).
+    de cada nino, y el indice de suficiencia de informacion (Seccion 6.2).
 
     Dos fuentes de peso DISTINTAS, tal como especifica el documento:
       - El SCORE de riesgo usa VARIABLE_WEIGHTS: pesos clinicos fijos,
         "asignados por el equipo" (Seccion 6.1).
-      - La CONFIANZA usa `confidence_weights`, si se entrega: "la importancia
+      - La SUFICIENCIA usa `confidence_weights`, si se entrega: "la importancia
         relativa de la variable, obtenida del feature importance del modelo"
         (Seccion 6.2) -- viene del Random Forest (ver
         core/train_model.py::compute_confidence_weights). Si no hay modelo
@@ -144,7 +184,7 @@ def score_heuristic(
 
     weighted_sum = 0.0
     total_weight = 0.0        # para el SCORE (pesos clinicos, Seccion 6.1)
-    total_weight_conf = 0.0   # para la CONFIANZA (feature importance del RF, Seccion 6.2)
+    total_weight_conf = 0.0   # para la SUFICIENCIA (feature importance del RF, Sec. 6.2)
     present_weight_conf = 0.0
     drivers: list[tuple[str, float]] = []
     missing_relevant: list[str] = []
@@ -191,14 +231,18 @@ def score_heuristic(
     raw_score = weighted_sum / total_weight if total_weight else 0.0
     risk = float(_sigmoid((raw_score - 0.35) * 6))  # centra y agudiza la curva
 
-    # --- Confianza (Seccion 6.2) ---
+    # --- Indice de suficiencia de informacion (Seccion 6.2) ---
+    # suficiencia = completitud x factor_historial. Es un indice de cuanta
+    # informacion hay, NO una probabilidad de acierto: dos registros con la
+    # misma suficiencia pueden tener incertidumbre predictiva muy distinta
+    # (eso se mide aparte, en core/uncertainty.py).
     completeness = present_weight_conf / total_weight_conf if total_weight_conf else 0.0
-    history_factor = history_confidence_factor(n_history, k)
-    confidence = completeness * history_factor
+    hist_factor = history_factor(n_history, k)
+    sufficiency = completeness * hist_factor
 
-    if confidence < 0.4:
+    if sufficiency < 0.4:
         level = "baja"
-    elif confidence < 0.7:
+    elif sufficiency < 0.7:
         level = "moderada"
     else:
         level = "alta"
@@ -209,8 +253,8 @@ def score_heuristic(
     return RiskResult(
         child_id=child_id,
         risk=round(risk, 3),
-        confidence=round(confidence, 3),
-        confidence_level=level,
+        sufficiency=round(sufficiency, 3),
+        sufficiency_level=level,
         drivers=top_drivers,
         missing_relevant=missing_relevant,
         n_history_days=n_history,
@@ -228,7 +272,7 @@ def predict_risk(
     """Motor de riesgo completo (Seccion 6.1). Usa el Random Forest entrenado
     (nivel principal) para el numero de riesgo; si no hay modelo, cae al score
     heuristico (nivel de respaldo). En ambos casos reutiliza la maquinaria
-    interpretable del heuristico para la confianza (Seccion 6.2), los drivers y
+    interpretable del heuristico para la suficiencia (Seccion 6.2), los drivers y
     las variables faltantes, y expone la linea base bayesiana del nino.
 
     `today_date` permite recalcular el riesgo de un dia PASADO (para graficar
@@ -243,25 +287,40 @@ def predict_risk(
     Esta es la funcion que consume la interfaz (app.py)."""
     model = load_model()
 
-    # El heuristico aporta confianza, drivers, faltantes e historial (siempre
-    # disponible). La confianza usa los pesos de completitud del RF (Seccion
+    # El heuristico aporta suficiencia, drivers, faltantes e historial (siempre
+    # disponible). La suficiencia usa los pesos de completitud del RF (Seccion
     # 6.2) cuando hay modelo entrenado; si no, cae a los pesos clinicos.
     confidence_weights = model.get("confidence_weights") if model is not None else None
     result = score_heuristic(logs, child_id, today, k, confidence_weights=confidence_weights)
 
+    feature_row = None
     if model is not None:
         try:
             from .features import build_features_for_today
             row = build_features_for_today(logs, child_id, today, k=k, mu=model["mu"], today_date=today_date)
             cols = model["feature_numeric"] + model["feature_categorical"]
             proba = float(model["pipeline"].predict_proba(row[cols])[0, 1])
+            # Calibracion isotonica (Seccion 9.3 revisada): el RF crudo esta
+            # sistematicamente descalibrado -- sus probabilidades se agolpan
+            # lejos de 0 y 1 por promediar arboles. El calibrador se ajusta
+            # fuera de muestra en core/train_model.py; si no existe (modelo
+            # viejo), se usa la probabilidad cruda.
+            calibrator = model.get("calibrator")
+            if calibrator is not None:
+                proba = float(calibrator.predict([proba])[0])
             result.risk = round(proba, 3)
             result.model_used = "random_forest"
+            feature_row = row
             if "theta_crisis_rate" in row.columns:
                 result.base_rate_bayes = round(float(row["theta_crisis_rate"].iloc[0]), 3)
         except Exception:
             # Ante cualquier problema, se conserva el riesgo heuristico ya calculado.
             result.model_used = "heuristico"
+
+    # --- Incertidumbre predictiva (tercer numero, separado de la suficiencia) ---
+    if feature_row is not None:
+        from .uncertainty import evaluate as _evaluar_incertidumbre
+        result.uncertainty = _evaluar_incertidumbre(model, feature_row)
 
     # Si no se pudo obtener del modelo, calculamos igual la linea base bayesiana.
     if result.base_rate_bayes is None:
@@ -279,15 +338,38 @@ def predict_risk(
     # heuristico (variable faltante de mayor peso clinico, siempre disponible).
     if compute_question and result.missing_relevant:
         chosen = None
+        no_vale_la_pena = False
         if model is not None:
             try:
-                from .question_selector import select_question_variance
-                chosen = select_question_variance(logs, child_id, today, result.missing_relevant, model, k)
+                from .question_selector import (
+                    expected_variance_reductions, net_utilities,
+                    vale_la_pena_preguntar)
+                reductions = expected_variance_reductions(
+                    logs, child_id, today, result.missing_relevant, model, k)
+                if reductions:
+                    result.question_scores = reductions
+                    # La pregunta NO se elige por ganancia bruta, sino por
+                    # utilidad neta = ganancia - lambda * carga de registro
+                    # (Seccion 6.3 revisada): la variable mas informativa no
+                    # siempre es la que vale la pena pedirle a la familia.
+                    result.question_utilities = net_utilities(reductions)
+                    if vale_la_pena_preguntar(reductions):
+                        chosen = max(result.question_utilities,
+                                     key=result.question_utilities.get)
+                    else:
+                        # Ningun dato faltante mejora la estimacion de hoy. No
+                        # se pregunta nada: no preguntar tambien es una salida
+                        # valida del selector, y es la coherente con el objetivo
+                        # de reducir la carga de registro.
+                        no_vale_la_pena = True
             except Exception:
                 chosen = None
         if chosen:
             result.suggested_question = chosen
             result.question_method = "reduccion_varianza"
+        elif no_vale_la_pena:
+            result.suggested_question = None
+            result.question_method = "sin_pregunta_util"
         else:
             result.suggested_question = suggest_question(result)
             result.question_method = "heuristico" if result.suggested_question else None

@@ -31,6 +31,30 @@ hacia atras (el dato de hoy predice si MANANA hay crisis).
 Se simulan los tres mecanismos de ausencia de datos de la Seccion 4.4
 (MCAR/MAR/MNAR) sobre los campos de la bitacora diaria del tutor.
 
+MECANISMO DE AUSENCIA: ES UN ESCENARIO, NO UN HECHO (revision de agosto 2026).
+La version anterior daba por sentado que "un vacio de informacion suele
+coincidir con los momentos de mas dificultad para la familia" y horneaba ese
+supuesto MNAR en los datos. Es plausible, pero con la evidencia disponible no
+esta demostrado como regla general, y un dataset que lo asume produce un
+modelo que lo confirma -- razonamiento circular.
+
+Ahora el mecanismo se elige con --missingness y la posicion declarada es la
+prudente: la ausencia PUEDE ser informativa, asi que el pipeline conserva
+indicadores de ausencia y antiguedad en vez de tratar el vacio como neutro;
+pero cual mecanismo opera de verdad lo tendran que decir los datos reales de
+Bluba. Los cuatro escenarios existen para medir la sensibilidad del sistema a
+ese supuesto:
+
+    mixto  (por defecto)  MCAR + MAR + MNAR juntos, como la version anterior.
+    mcar                  ausencia puramente aleatoria: el silencio no informa.
+    mar                   depende de cosas observables (fin de semana, colegio),
+                          no del resultado.
+    mnar                  el caso fuerte: se registra bastante menos los dias
+                          dificiles.
+
+Uso previsto: generar los cuatro y comparar el panel de metricas. Si el
+sistema solo funciona bajo MNAR, eso hay que saberlo antes de prometer nada.
+
 Uso:
     python generate_synthetic_data.py --out ../data/bitacoras.csv
 """
@@ -183,9 +207,37 @@ def _sample_ordinal_by_severity(options: list[str], severity: float, sharpness: 
     return RNG.choice(options, p=weights)
 
 
+# Escenario de ausencia activo. Se fija desde main() y por defecto reproduce
+# EXACTAMENTE el comportamiento anterior, para que el dataset del repositorio no
+# cambie al introducir esta opcion.
+MECANISMO = "mixto"
+
+
+def _probabilidades(row: dict, is_weekend: bool) -> tuple[float, float, float]:
+    """Probabilidades de ausencia segun el escenario activo.
+
+    Devuelve (p_mcar, p_mnar, p_weekend). Cada escenario apaga las componentes
+    que no le corresponden, manteniendo la ausencia TOTAL en un rango parecido
+    para que la comparacion entre escenarios no confunda "mecanismo distinto"
+    con "mas datos faltantes".
+    """
+    if MECANISMO == "mcar":
+        # Todo el peso en la componente aleatoria; sin dependencia del dia ni
+        # del resultado. El indicador de ausencia no deberia aportar nada.
+        return 0.19, 0.0, 0.19
+    if MECANISMO == "mar":
+        # Depende solo de variables OBSERVADAS (fin de semana / origen escolar).
+        return 0.06, 0.0, 0.45
+    if MECANISMO == "mnar":
+        # Caso fuerte: la brecha entre dias con y sin episodio es grande.
+        return 0.06, 0.32 if row["crisis_24h"] else 0.04, 0.35
+    # mixto (por defecto): los tres a la vez, como hasta ahora.
+    return 0.06, 0.20 if row["crisis_24h"] else 0.10, 0.35 if is_weekend else 0.05
+
+
 def simulate_missingness(row: dict, day_of_week: int) -> dict:
-    """Aplica los tres mecanismos de ausencia de datos de la Seccion 4.4 sobre
-    los campos de la bitacora diaria del tutor."""
+    """Aplica los mecanismos de ausencia de datos de la Seccion 4.4 sobre los
+    campos de la bitacora diaria del tutor, segun el escenario MECANISMO."""
     is_weekend = day_of_week >= 5
     p_missing_weekend = 0.35 if is_weekend else 0.05          # MAR
     # MNAR: la familia registra menos en los dias mas dificiles (el silencio es
@@ -194,11 +246,44 @@ def simulate_missingness(row: dict, day_of_week: int) -> dict:
     # y el modelo aprende "registro completo => manana esta bien", ahogando el
     # contenido clinico real de las variables. Aqui el silencio informa, pero no
     # decide.
-    p_missing_mnar = 0.20 if row["crisis_24h"] else 0.10       # MNAR
-    p_missing_mcar = 0.06                                       # MCAR
+    p_missing_mcar, p_missing_mnar, p_weekend_base = _probabilidades(row, is_weekend)
+    if MECANISMO != "mixto":
+        p_missing_weekend = p_weekend_base if is_weekend else min(p_weekend_base, 0.05)
 
     out = dict(row)
     never_null = {"child_id", "date", "crisis_24h", "crisis_hoy", "fuente_registro"}
+
+    # --- Dia sin registro: nadie abrio la app ---------------------------------
+    # Sortear la ausencia campo por campo hace que un dia COMPLETAMENTE en
+    # blanco tenga probabilidad practicamente nula (con 14 sorteos
+    # independientes al 10-30%, no ocurre nunca en 3.700 filas). Pero en la
+    # practica ese es el caso incompleto MAS comun: la familia simplemente no
+    # registro nada ese dia. Es un evento del dia entero, no 14 ausencias
+    # independientes.
+    #
+    # Sin este mecanismo el dataset no contiene ningun dia totalmente vacio, y
+    # el modelo termina EXTRAPOLANDO justo donde la interfaz mas lo consulta:
+    # el estado inicial de cada dia, antes de que nadie haya registrado nada.
+    # Extrapolando la pendiente MNAR, un dia en blanco daba ~0.87 de riesgo --
+    # un numero inventado sobre una region del espacio de entrada que el
+    # modelo nunca vio.
+    #
+    # La brecha MNAR se mantiene moderada por la misma razon que mas abajo: el
+    # silencio informa, pero no debe decidir.
+    if MECANISMO == "mcar":
+        p_dia_sin_registro = 0.08          # no depende de nada
+    elif MECANISMO == "mar":
+        p_dia_sin_registro = 0.14 if is_weekend else 0.05
+    elif MECANISMO == "mnar":
+        p_dia_sin_registro = 0.16 if row["crisis_24h"] else 0.04
+    else:
+        p_dia_sin_registro = 0.10 if row["crisis_24h"] else 0.06
+    if RNG.random() < p_dia_sin_registro:
+        for field in list(out.keys()):
+            if not field.startswith("_") and field not in never_null:
+                out[field] = None
+        return out
+
     tutor_fields = ["calidad_sueno", "modo_despertar", "adherencia_medicacion",
                      "estado_gastrointestinal", "nivel_regulacion_general_dia"]
     # Campos que dependen del colegio/terapia: los fines de semana casi no se
@@ -452,7 +537,16 @@ def main():
                          help="ninos adicionales con historial corto (2-5 dias), para "
                               "demostrar el escenario de arranque en frio (Seccion 3.6)")
     parser.add_argument("--out", type=str, default="bitacoras.csv")
+    parser.add_argument("--missingness", type=str, default="mixto",
+                         choices=["mixto", "mcar", "mar", "mnar"],
+                         help="mecanismo de ausencia de datos a simular (Seccion 4.4). "
+                              "'mixto' reproduce el dataset del repositorio; los otros "
+                              "tres sirven para medir la sensibilidad del sistema a ese "
+                              "supuesto, que con datos reales todavia no se conoce.")
     args = parser.parse_args()
+
+    global MECANISMO
+    MECANISMO = args.missingness
 
     children = make_children(args.n_children)
     children["history_days"] = args.n_days
@@ -475,7 +569,9 @@ def main():
     children.to_csv(args.out.replace(".csv", "_ninos.csv"), index=False)
     logs.to_csv(args.out, index=False)
     print(f"Generados {len(logs)} registros para {len(children)} ninos "
-          f"({args.n_children} con historial completo + {args.n_cold_start} de arranque en frio) -> {args.out}")
+          f"({args.n_children} con historial completo + {args.n_cold_start} de arranque "
+          f"en frio) -> {args.out}")
+    print(f"Mecanismo de ausencia simulado: {MECANISMO}")
 
 
 if __name__ == "__main__":

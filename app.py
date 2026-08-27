@@ -207,6 +207,26 @@ TIPO_EVENTO_LABELS = {"Sobrecarga Sensorial": "🎧 Sobrecarga sensorial",
                       "Transicion de Actividad": "🔄 Transición de actividad",
                       "Desregulacion Emocional": "⚡ Desregulación emocional",
                       "Alimentacion": "🍎 Alimentación"}
+# Bandas de intensidad EXACTAS de la tabla de eventos de Bluba. La plataforma
+# real no registra un numero de 0 a 10: registra una de estas tres. El slider
+# anterior prometia una precision que no existe en el dato de origen.
+# El valor numerico es el punto medio de cada banda, y es lo unico que ve el
+# modelo (las variables intensidad_max / intensidad_sum son numericas).
+INTENSIDAD_BANDAS = {"Leve (1-3)": 2.0, "Moderada (4-7)": 5.5, "Severa (8-10)": 9.0}
+INTENSIDAD_OPTS = list(INTENSIDAD_BANDAS)
+INTENSIDAD_LABELS = {"Leve (1-3)": "🟢 Leve (1-3)",
+                     "Moderada (4-7)": "🟠 Moderada (4-7)",
+                     "Severa (8-10)": "🔴 Severa (8-10)"}
+
+
+def banda_de_intensidad(valor) -> str:
+    """Banda que corresponde a un valor numerico, para releer lo ya guardado."""
+    if valor is None:
+        return INTENSIDAD_OPTS[1]
+    v = float(valor)
+    return "Leve (1-3)" if v <= 3 else ("Moderada (4-7)" if v <= 7 else "Severa (8-10)")
+
+
 RESULTADO_OPTS = ["Regulacion Exitosa", "Regulacion Parcial", "Regulacion No Exitosa"]
 RESULTADO_LABELS = {"Regulacion Exitosa": "🟢 Regulación exitosa",
                     "Regulacion Parcial": "🟡 Regulación parcial",
@@ -739,6 +759,11 @@ def build_today_dict(answers: dict) -> dict:
         today["intensidad_sum_desregulacion"] = float(intensidad) if (n_ev and intensidad) else 0.0
         today["tipo_evento_principal"] = answers.get("_tipo_evento") if n_ev else None
         today["resultado_estrategia_principal"] = answers.get("_resultado") if n_ev else None
+        # detonante_gatillante y estrategia_calma_aplicada NO se agregan a
+        # `today`: son texto libre y el modelo no procesa lenguaje natural. Se
+        # guardan en `answers` y se muestran a las personas. Meterlos aqui
+        # obligaria a inventar una codificacion -- y a fingir que el Random
+        # Forest los esta leyendo, que es justo lo que no hace.
     return {k: v for k, v in today.items() if v is not None}
 
 
@@ -959,19 +984,42 @@ if vista.startswith("👪"):
                         "episodio", [False, True], index=None, width="stretch",
                         format_func=lambda v: "🟢 No hubo episodios" if not v else "🔴 Sí, hubo un episodio",
                         label_visibility="collapsed", key="hero_hubo")
-                    intensidad = tipo_ev = resultado = None
+                    # Mismo orden y mismos campos que la tabla de eventos de
+                    # Bluba: tipo, intensidad, QUE lo desregulo, QUE se hizo,
+                    # como resulto. Los dos del medio son texto libre porque en
+                    # la plataforma real lo son: un detonante no cabe en una
+                    # lista cerrada -- "etiqueta molesta en una prenda nueva" no
+                    # es una categoria que nadie hubiera anticipado.
+                    banda = tipo_ev = resultado = None
+                    detonante = estrategia = ""
                     if hubo:
-                        intensidad = st.slider("Intensidad del episodio", 0, 10, 5,
-                                               help="0-3 leve · 4-7 moderada · 8-10 fuerte")
                         tipo_ev = st.selectbox("Tipo de evento", TIPO_EVENTO_OPTS,
                                                format_func=lambda v: TIPO_EVENTO_LABELS[v])
-                        resultado = st.selectbox("Resultado de la estrategia", RESULTADO_OPTS,
+                        banda = st.selectbox("Intensidad", INTENSIDAD_OPTS, index=1,
+                                             format_func=lambda v: INTENSIDAD_LABELS[v])
+                        detonante = st.text_area(
+                            "¿Qué lo desreguló?", key="hero_detonante", height=80,
+                            placeholder="Por ejemplo: música fuerte en el supermercado "
+                                        "y mucha gente alrededor.",
+                            help="Escríbelo con tus palabras. No hay lista de opciones "
+                                 "porque los detonantes no se parecen entre niños.")
+                        estrategia = st.text_area(
+                            "¿Qué estrategia o apoyo se aplicó?", key="hero_estrategia",
+                            height=80,
+                            placeholder="Por ejemplo: salimos a un espacio abierto y le "
+                                        "puse el chaleco de peso.",
+                            help="Qué se hizo durante el episodio. Con el tiempo, esto es "
+                                 "lo que permite ver qué apoyo funciona para este niño.")
+                        resultado = st.selectbox("¿Cómo resultó?", RESULTADO_OPTS,
                                                  format_func=lambda v: RESULTADO_LABELS[v])
                     if st.button("Guardar registro de hoy", type="primary",
                                  width="stretch", disabled=hubo is None):
                         answers["n_eventos_desregulacion"] = 1 if hubo else 0
-                        answers["_intensidad"] = intensidad if hubo else None
+                        answers["_intensidad"] = INTENSIDAD_BANDAS[banda] if hubo else None
+                        answers["_banda_intensidad"] = banda if hubo else None
                         answers["_tipo_evento"] = tipo_ev if hubo else None
+                        answers["_detonante"] = (detonante.strip() or None) if hubo else None
+                        answers["_estrategia"] = (estrategia.strip() or None) if hubo else None
                         answers["_resultado"] = resultado if hubo else None
                         answers["_question_answered"] = True
                         st.rerun()
@@ -1367,6 +1415,38 @@ elif vista.startswith("🩺"):
                                   f"Información {result.sufficiency_level}", 138,
                                   sub="de la predicción"), unsafe_allow_html=True)
 
+        # --- Lo que escribio la familia sobre el episodio de hoy -------------
+        # Texto libre: el modelo NO lo lee (no hay procesamiento de lenguaje en
+        # el MVP). Se muestra porque es informacion que solo tiene la persona
+        # que estuvo ahi, y porque es lo que con el tiempo permite responder
+        # "que apoyo funciona para este nino" (Seccion 13).
+        _det = answers.get("_detonante")
+        _est = answers.get("_estrategia")
+        if _det or _est:
+            _banda = answers.get("_banda_intensidad")
+            _bloques = ""
+            if _det:
+                _bloques += (f'<div style="margin-top:8px;"><div class="eyebrow">'
+                             f'Qué lo desreguló</div>'
+                             f'<div style="font-size:13.5px;color:{INK};line-height:1.6;">'
+                             f'{_det}</div></div>')
+            if _est:
+                _bloques += (f'<div style="margin-top:10px;"><div class="eyebrow">'
+                             f'Estrategia o apoyo aplicado</div>'
+                             f'<div style="font-size:13.5px;color:{INK};line-height:1.6;">'
+                             f'{_est}</div></div>')
+            st.markdown(f"""
+<div class="card" style="margin-bottom:12px;">
+  <div class="eyebrow">Registro del episodio de hoy{' · ' + _banda if _banda else ''}</div>
+  {_bloques}
+  <div style="font-size:11.5px;color:{MUTED};margin-top:10px;line-height:1.5;">
+    Texto escrito por quien estuvo presente. <b>El modelo no lo lee</b> — no hay
+    procesamiento de lenguaje natural en el MVP. Se conserva porque es contexto que
+    ningún campo cerrado captura, y porque es la base para estudiar más adelante qué
+    apoyo funciona con este niño.
+  </div>
+</div>""", unsafe_allow_html=True)
+
         st.markdown("###### Completitud del registro de hoy")
         n_missing = len(result.missing_relevant)
         n_total = len(ALL_RELEVANT_FIELDS)
@@ -1584,17 +1664,26 @@ else:
                              value=bool(answers.get("n_eventos_desregulacion")))
         e1, e2, e3 = st.columns(3, gap="medium")
         with e1:
-            inten_c = st.slider("Intensidad", 0, 10, int(answers.get("_intensidad") or 5))
-        with e2:
             tipo_c = st.selectbox(
                 "Tipo de evento", TIPO_EVENTO_OPTS, format_func=lambda v: TIPO_EVENTO_LABELS[v],
                 index=TIPO_EVENTO_OPTS.index(answers["_tipo_evento"])
                 if answers.get("_tipo_evento") in TIPO_EVENTO_OPTS else 0)
+        with e2:
+            banda_c = st.selectbox(
+                "Intensidad", INTENSIDAD_OPTS, format_func=lambda v: INTENSIDAD_LABELS[v],
+                index=INTENSIDAD_OPTS.index(banda_de_intensidad(answers.get("_intensidad"))))
         with e3:
             res_c = st.selectbox(
                 "Resultado", RESULTADO_OPTS, format_func=lambda v: RESULTADO_LABELS[v],
                 index=RESULTADO_OPTS.index(answers["_resultado"])
                 if answers.get("_resultado") in RESULTADO_OPTS else 0)
+        det_c = st.text_area("¿Qué lo desreguló?", value=answers.get("_detonante") or "",
+                             height=80, key="full_detonante",
+                             placeholder="Con tus palabras: qué pasó justo antes.")
+        est_c = st.text_area("¿Qué estrategia o apoyo se aplicó?",
+                             value=answers.get("_estrategia") or "",
+                             height=80, key="full_estrategia",
+                             placeholder="Qué se hizo durante el episodio.")
 
         if st.form_submit_button("Guardar bitácora completa", width="stretch",
                                  type="primary"):
@@ -1603,8 +1692,11 @@ else:
                 if val is not None:
                     answers[field] = val
             answers["n_eventos_desregulacion"] = 1 if hubo_c else 0
-            answers["_intensidad"] = inten_c if hubo_c else None
+            answers["_intensidad"] = INTENSIDAD_BANDAS[banda_c] if hubo_c else None
+            answers["_banda_intensidad"] = banda_c if hubo_c else None
             answers["_tipo_evento"] = tipo_c if hubo_c else None
+            answers["_detonante"] = (det_c.strip() or None) if hubo_c else None
+            answers["_estrategia"] = (est_c.strip() or None) if hubo_c else None
             answers["_resultado"] = res_c if hubo_c else None
             answers["_question_answered"] = True
             st.rerun()

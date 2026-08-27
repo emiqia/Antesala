@@ -143,6 +143,38 @@ Los nombres y categorías coinciden **exactamente** con los observados en los
 datos anonimizados de Bluba y en las capturas de la app móvil, no con nombres
 inventados.
 
+#### El registro de un episodio de desregulación
+
+La tabla de eventos de Bluba tiene ocho columnas, y **dos de ellas son texto
+libre**. Es una decisión de diseño de la plataforma, no un descuido, y el
+prototipo la respeta:
+
+| Campo | Tipo | Ejemplo real |
+|---|---|---|
+| `tipo_evento` | categórico | Sobrecarga Sensorial |
+| `intensidad` | **banda** | Leve (1-3) · Moderada (4-7) · Severa (8-10) |
+| `detonante_gatillante` | **texto libre** | *"Etiqueta molesta en prenda de vestir nueva."* |
+| `estrategia_calma_aplicada` | **texto libre** | *"Cambio de prenda por ropa suave sin costuras y masaje en espalda."* |
+| `resultado_estrategia` | categórico | Regulación Exitosa / Parcial / No Exitosa |
+
+**Por qué el detonante no puede ser una lista cerrada.** *"Etiqueta molesta en
+una prenda nueva"* no es una categoría que nadie hubiera anticipado al diseñar
+un formulario. Los detonantes no se parecen entre niños, y obligar a elegir una
+opción destruiría justamente la información que hace a cada niño distinto — que
+es la premisa del sistema.
+
+**La intensidad se registra en bandas, no en una escala continua.** El prototipo
+usa las tres bandas reales y mapea al punto medio (2 / 5,5 / 9) para las
+variables numéricas del modelo. Un deslizador de 0 a 10 prometía una precisión
+que el dato de origen no tiene.
+
+**Los dos campos de texto libre NO son entrada del modelo.** No hay
+procesamiento de lenguaje natural en el MVP. Se capturan, se conservan y se
+muestran a las personas, porque son contexto que ningún campo cerrado captura y
+porque son la base para responder más adelante *"¿qué apoyo funciona con este
+niño?"* (§13). Alimentarlos al Random Forest exigiría inventar una codificación
+y fingir que el modelo los está leyendo.
+
 ### 5.2 Variables derivadas
 
 Promedios móviles de 3 y 7 días; cambio respecto de la línea base individual;
@@ -770,6 +802,60 @@ vigilancia o de control de conducta.
 Las cuatro ausencias son deliberadas y están justificadas en sus secciones. No
 se consideran necesarias para demostrar el núcleo del producto.
 
+### 20.1 Dependencias actuales
+
+Todo lo que el prototipo necesita hoy. Sin base de datos que instalar, sin
+servicios externos, sin claves de API.
+
+**Requisito previo:** Python 3.10 o superior *(probado en 3.10.0)*.
+
+```bash
+pip install -r requirements.txt
+```
+
+| Paquete | Versión probada | Para qué |
+|---|---|---|
+| `pandas` | 2.3.3 | Manipulación de las bitácoras y la matriz de variables |
+| `numpy` | 1.26.4 | Cálculo numérico; base del *partial pooling* |
+| `scikit-learn` | 1.7.2 | Random Forest, logística de referencia, calibración, métricas |
+| `joblib` | 1.5.3 | Serialización del modelo entrenado |
+| `streamlit` | 1.62.0 | Interfaz de las tres vistas |
+| `plotly` | 6.9.0 | Gráficos de tendencia, ranking de preguntas e importancias |
+| `pytest` | 9.1.1 | Los 114 tests |
+
+`sqlite3` viene en la biblioteca estándar de Python: **no hay que instalarlo**.
+Es lo que persiste el registro de intervenciones (§13) en `data/antesala.db`,
+un archivo que se crea solo al usar la aplicación.
+
+### 20.2 Dependencias a instalar más adelante
+
+Ninguna de estas está instalada ni es necesaria para ejecutar el prototipo. Se
+dejan documentadas con la sección que las justifica, para que quien retome el
+proyecto sepa exactamente qué instalar y para qué.
+
+| Paquete | Para qué | Sección |
+|---|---|---|
+| `fastapi` + `uvicorn` | Exponer el motor como API e integrarlo con la plataforma de Bluba | §14 |
+| `lightgbm` | Modelo alternativo al Random Forest, a contrastar en el benchmark | §8.2 |
+| `pymc` + `arviz` | Modelo jerárquico bayesiano completo, con posteriores estimadas | §6.4 |
+| `shap` | Atribución aditiva con garantía de reparto, en reemplazo de la atribución contrafactual de una variable a la vez | §11 |
+| `mapie` *(o equivalente)* | Intervalos y conjuntos conformales, con garantía de cobertura | §9.3 |
+
+```bash
+# Cuando corresponda, y por separado — ninguna es necesaria hoy:
+pip install fastapi uvicorn      # §14  API
+pip install lightgbm             # §8.2 modelo alternativo
+pip install pymc arviz           # §6.4 jerárquico completo
+pip install shap                 # §11  atribución aditiva
+pip install mapie                # §9.3 intervalos conformales
+```
+
+**Por qué no están ya instaladas.** Cada dependencia añadida es una versión que
+fijar, un conflicto potencial y una barrera más para quien clone el repositorio.
+Ninguna de las cinco cambia lo que el sistema responde hoy; todas corresponden a
+capacidades de una fase con datos reales. Agregarlas antes de necesitarlas
+habría hecho el prototipo más frágil sin hacerlo más capaz.
+
 ---
 
 ## 21. Roadmap
@@ -946,9 +1032,16 @@ sólida para una validación posterior con datos reales.
 Todas las cifras de este documento salen de:
 
 ```bash
+pip install -r requirements.txt            # §20.1: dependencias
+
 python data/generate_synthetic_data.py --out data/bitacoras.csv
 python core/train_model.py                 # panel de evaluación y calibración
 python scripts/benchmark.py                # §18: comparadores, ablaciones, k
 python scripts/sensibilidad_ausencia.py    # §7: MCAR / MAR / MNAR / mixto
 pytest                                     # §17 fase 1: 114 tests
+
+streamlit run app.py                       # la aplicación
 ```
+
+Requiere **Python 3.10 o superior**. El generador es determinista (semilla
+fija), así que las cifras se reproducen exactamente.

@@ -104,3 +104,29 @@ def test_no_queda_la_palabra_confianza_en_la_interfaz():
         piezas += [c.value for c in at.caption]
         texto = " ".join(piezas).lower()
         assert "confianza" not in texto, f"aparece 'confianza' en {vista!r}"
+
+
+def test_el_registro_de_episodio_pide_texto_libre():
+    """El esquema real de Bluba tiene dos campos de TEXTO LIBRE que el
+    prototipo no capturaba: que desregulo al nino (`detonante_gatillante`) y
+    que se hizo (`estrategia_calma_aplicada`). Un detonante como "etiqueta
+    molesta en una prenda nueva" no cabe en una lista cerrada, y obligar a
+    elegir una opcion destruiria justo la informacion que hace distinto a cada
+    nino."""
+    at = _correr("📝  Bitácora completa")
+    _sin_excepciones(at, "la bitacora completa")
+    etiquetas = [t.label for t in at.text_area]
+    assert any("¿Qué lo desreguló?" in e for e in etiquetas), etiquetas
+    assert any("estrategia o apoyo se aplicó" in e for e in etiquetas), etiquetas
+
+
+def test_la_intensidad_usa_las_bandas_reales():
+    """Bluba registra la intensidad en tres bandas, no en una escala continua.
+    Un deslizador de 0 a 10 prometia una precision que el dato de origen no
+    tiene."""
+    at = _correr("📝  Bitácora completa")
+    _sin_excepciones(at, "la bitacora completa")
+    opciones = [o for sb in at.selectbox for o in (sb.options or [])]
+    for banda in ("Leve (1-3)", "Moderada (4-7)", "Severa (8-10)"):
+        assert any(banda in str(o) for o in opciones), f"falta la banda {banda}"
+    assert len(at.slider) == 0, "quedo un deslizador de intensidad"

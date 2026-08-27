@@ -32,6 +32,12 @@ otros niños, sino cuánto se desvía de su propio patrón.**
 **Requisitos:** Python 3.10 o superior. Nada más — sin base de datos que
 instalar, sin servicios externos, sin claves de API.
 
+Las siete dependencias van en `requirements.txt`: `pandas`, `numpy`,
+`scikit-learn`, `joblib`, `streamlit`, `plotly` y `pytest`. `sqlite3` viene en
+la biblioteca estándar de Python. El detalle de versiones probadas y las
+dependencias de fases posteriores están en
+[`DOCUMENTO_TECNICO.md` §20](DOCUMENTO_TECNICO.md).
+
 ```bash
 # 1. Dependencias
 pip install -r requirements.txt

@@ -130,3 +130,53 @@ def test_la_intensidad_usa_las_bandas_reales():
     for banda in ("Leve (1-3)", "Moderada (4-7)", "Severa (8-10)"):
         assert any(banda in str(o) for o in opciones), f"falta la banda {banda}"
     assert len(at.slider) == 0, "quedo un deslizador de intensidad"
+
+
+def test_la_trazabilidad_no_contradice_a_la_sugerencia():
+    """Regresion de un bug visible en pantalla.
+
+    El panel del equipo leia `result.drivers` (solo variables registradas HOY
+    con desviacion alta) mientras la sugerencia que ve la familia se arma con
+    las senales de la narrativa (ventana de 3 dias). En un dia en blanco eso
+    daba una contradiccion directa: la familia recibia "considere anticipar una
+    rutina de sueno mas temprana" y el panel del equipo, en la misma pantalla,
+    decia "Hoy no se activo ninguna regla de la biblioteca".
+
+    Si hay sugerencia, tiene que haber reglas que mostrar.
+    """
+    import pandas as pd
+    from core.risk_model import predict_risk
+    from core.narrative import build_narrative, claves_candidatas
+    from core.recommendations import (
+        DEFAULT_RECOMMENDATION, recomendaciones_activadas)
+
+    logs = pd.read_csv(APP.parent / "data" / "bitacoras.csv", parse_dates=["date"])
+    escenarios = [{}, {"participacion_actividades": "No participa"}]
+    for hoy in escenarios:
+        for cid in list(logs["child_id"].unique())[:6]:
+            r = predict_risk(logs, cid, hoy, compute_question=False)
+            n = build_narrative(logs, cid, hoy, r, nombre=cid, audiencia="profesional")
+            activadas = recomendaciones_activadas(
+                claves_candidatas(n.senales, r.drivers))
+            propone_algo = DEFAULT_RECOMMENDATION not in n.sugerencia
+            if propone_algo:
+                assert activadas, (
+                    f"{cid}: la familia lee una sugerencia pero el panel no "
+                    f"muestra ninguna regla activada")
+                # Y lo que llego al texto tiene que estar entre lo activado.
+                ids = {x.id for x in activadas}
+                from core.recommendations import BIBLIOTECA
+                for clave in n.reglas_aplicadas:
+                    assert BIBLIOTECA[clave].id in ids
+
+
+def test_el_panel_marca_que_reglas_llegaron_al_texto():
+    """El distintivo «en la sugerencia de hoy» separa las reglas que se
+    activaron de las que ademas entraron en el parrafo que lee la familia
+    (el texto se limita a 2-3 acciones). Se comparaba r.id ('REC-01') contra
+    un conjunto de CLAVES de variable ('calidad_sueno'), asi que no coincidia
+    nunca y el distintivo no salia jamas."""
+    at = _correr("🩺  Panel del equipo")
+    _sin_excepciones(at, "el panel del equipo")
+    texto = " ".join(m.value for m in at.markdown)
+    assert "EN LA SUGERENCIA DE HOY" in texto

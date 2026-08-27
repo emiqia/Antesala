@@ -36,7 +36,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from core.narrative import (ETIQUETA_ORIGEN, UMBRAL_ELEVADO, UMBRAL_MODERADO,
+from core.narrative import (claves_candidatas,ETIQUETA_ORIGEN, UMBRAL_ELEVADO, UMBRAL_MODERADO,
                             build_narrative)
 from core.recommendations import (
     VARIABLE_LABELS, BIBLIOTECA, recomendaciones_activadas)
@@ -1529,10 +1529,18 @@ elif vista.startswith("🩺"):
     # ---------- Trazabilidad de la recomendacion (Secciones 12 y 19) ----------
     st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
     st.markdown("##### De dónde sale cada sugerencia")
-    activadas = recomendaciones_activadas(result.drivers, excluidas)
-    apagadas = [BIBLIOTECA[d] for d in result.drivers
+    # MISMA fuente que la sugerencia que acaba de leer la familia. Usar aqui
+    # solo result.drivers producia una contradiccion visible: en un dia en
+    # blanco la familia recibia una sugerencia y este panel decia que no se
+    # habia activado ninguna regla.
+    candidatos = claves_candidatas(narrativa_pro.senales, result.drivers)
+    activadas = recomendaciones_activadas(candidatos, excluidas)
+    en_sugerencia = set(narrativa_pro.reglas_aplicadas)
+    apagadas = [BIBLIOTECA[d] for d in candidatos
                 if d in BIBLIOTECA and BIBLIOTECA[d].excluible
                 and BIBLIOTECA[d].id in excluidas]
+    VISIBLES_REGLAS = 6
+    ocultas = max(0, len(activadas) - VISIBLES_REGLAS)
 
     if not activadas and not apagadas:
         st.info("Hoy no se activó ninguna regla de la biblioteca: no hay ninguna "
@@ -1543,13 +1551,23 @@ elif vista.startswith("🩺"):
                    f"y quién responde por ella (Sección 12). Ninguna ha sido revisada "
                    f"todavía por el equipo clínico de Bluba — eso es un dato del sistema, "
                    f"no un descuido.")
-        for r in activadas:
+        for r in activadas[:VISIBLES_REGLAS]:
             revisada = r.estado_revision == "revisada"
+            # `reglas_aplicadas` guarda CLAVES de variable (calidad_sueno),
+            # no ids de regla (REC-01): comparar contra r.id no coincidia nunca.
+            usada = r.driver in en_sugerencia
             with st.container(border=True):
+                # Se arma fuera del f-string: en Python 3.10 una expresion de
+                # f-string no puede contener barras invertidas, y este badge
+                # necesita comillas escapadas.
+                badge_usada = (
+                    f"<span style='color:{PURPLE};font-size:11px;'>"
+                    f" · EN LA SUGERENCIA DE HOY</span>") if usada else ""
                 st.markdown(
                     f"<div style='display:flex;justify-content:space-between;gap:10px;"
                     f"align-items:baseline;'>"
-                    f"<b style='color:{INK};'>{r.id} · {_feature_label(r.driver)}</b>"
+                    f"<b style='color:{INK};'>{r.id} · {_feature_label(r.driver)}"
+                    f"{badge_usada}</b>"
                     f"<span style='font-size:11px;font-weight:700;"
                     f"color:{GOOD if revisada else WARNING};'>"
                     f"{'revisada' if revisada else 'sin revisión clínica'}</span></div>"
@@ -1572,6 +1590,12 @@ elif vista.startswith("🩺"):
                     st.caption("Esta entrada no se puede excluir: verificar la "
                                "administración de un medicamento y derivar al equipo "
                                "tratante son canales de seguridad, no preferencias.")
+
+        if ocultas:
+            st.caption(f"Se activaron {len(activadas)} reglas en total; se muestran las "
+                       f"{VISIBLES_REGLAS} de mayor prioridad. Solo las marcadas «en la "
+                       f"sugerencia de hoy» llegaron al texto que ve la familia — el resto "
+                       f"quedó fuera por el límite de 3 acciones por mensaje.")
 
         for r in apagadas:
             with st.container(border=True):

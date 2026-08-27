@@ -222,6 +222,10 @@ class Narrative:
     sin_causa_aparente: bool = False  # riesgo alto sin senales que lo expliquen
     preliminar: bool = False          # suficiencia baja: no es una prediccion confiable
     ficha_tecnica: str | None = None  # linea de cifras (solo audiencia profesional)
+    # Claves de la biblioteca cuya accion entro REALMENTE en `sugerencia`, en
+    # orden. Es lo que permite que el panel del equipo muestre la trazabilidad
+    # de lo que la familia acaba de leer, y no otra cosa parecida.
+    reglas_aplicadas: list[str] = field(default_factory=list)
 
 
 # --- utilidades -------------------------------------------------------------
@@ -345,8 +349,28 @@ def _nivel(risk: float) -> str:
     return "bajo"
 
 
+def claves_candidatas(senales: list[Signal], drivers: list[str]) -> list[str]:
+    """Todo lo que hoy podria activar una recomendacion, en orden de prioridad.
+
+    Las senales de la ventana primero (son las que explican el riesgo), y
+    despues los drivers del registro de hoy que no esten ya cubiertos. El panel
+    del equipo usa esta misma lista, para no mostrar una trazabilidad distinta
+    de la que produjo el texto.
+    """
+    vistas = {s.key for s in senales}
+    orden = [s.key for s in senales]
+    orden += [d for d in drivers if d not in vistas]
+    # dedupe conservando el orden
+    salida, ya = [], set()
+    for k in orden:
+        if k not in ya:
+            ya.add(k)
+            salida.append(k)
+    return salida
+
+
 def _acciones(senales: list[Signal], drivers: list[str], maximo: int = 3,
-              excluidas: set[str] | None = None) -> list[str]:
+              excluidas: set[str] | None = None) -> list[tuple[str, str]]:
     """Estrategias preventivas, en el mismo orden de prioridad que las senales.
     Reutiliza la biblioteca auditable de core/recommendations.py (Seccion 12).
 
@@ -356,19 +380,21 @@ def _acciones(senales: list[Signal], drivers: list[str], maximo: int = 3,
     genera, o reaparece en el texto aunque la pantalla no la liste.
     """
     excluidas = excluidas or set()
-    orden = [s.key for s in senales] + [d for d in drivers if d not in {s.key for s in senales}]
-    acciones: list[str] = []
-    for key in orden:
+    salida: list[tuple[str, str]] = []
+    textos: set[str] = set()
+    for key in claves_candidatas(senales, drivers):
         entrada = BIBLIOTECA.get(key)
         if entrada is None:
             continue
         if entrada.excluible and entrada.id in excluidas:
             continue
-        if entrada.accion not in acciones:
-            acciones.append(entrada.accion)
-        if len(acciones) >= maximo:
+        if entrada.accion in textos:
+            continue
+        textos.add(entrada.accion)
+        salida.append((key, entrada.accion))
+        if len(salida) >= maximo:
             break
-    return acciones
+    return salida
 
 
 # --- API --------------------------------------------------------------------
@@ -466,6 +492,10 @@ def build_narrative(
 
     # --- Frase 3: la sugerencia ---------------------------------------------
     acciones = _acciones(top, drivers, excluidas=excluidas)
+    # `acciones` es [(clave, texto)]: la clave alimenta la trazabilidad del
+    # panel del equipo y el texto va al parrafo. Se separan aqui una sola vez
+    # para que ningun sitio de uso tenga que recordar desempaquetar la tupla.
+    textos_accion = [a for _, a in acciones]
     if pregunta_pendiente == "auto":
         pregunta_pendiente = getattr(result, "suggested_question", None)
     etiqueta_pendiente = VARIABLE_LABELS.get(pregunta_pendiente) if pregunta_pendiente else None
@@ -475,14 +505,14 @@ def build_narrative(
     elif preliminar and acciones:
         # Ya no se esta pidiendo nada mas hoy: se entrega la accion preventiva
         # como precaucion, con la salvedad de suficiencia mas abajo.
-        sugerencia = f"Mientras tanto, como precaución, considere {_unir(acciones[:2])}."
+        sugerencia = f"Mientras tanto, como precaución, considere {_unir(textos_accion[:2])}."
     elif preliminar:
         sugerencia = "Mantenga la rutina habitual y observe durante el día."
     elif nivel == "bajo" and not top:
         sugerencia = ("Mantenga la rutina habitual y los apoyos que están "
                       "funcionando.")
     elif acciones:
-        sugerencia = f"Considere {_unir(acciones)}."
+        sugerencia = f"Considere {_unir(textos_accion)}."
     else:
         sugerencia = f"Considere {DEFAULT_RECOMMENDATION}."
 
@@ -527,6 +557,8 @@ def build_narrative(
                  f"{len(result.missing_relevant)} variables sin registrar hoy.")
 
     return Narrative(
+        reglas_aplicadas=[k for k, _ in acciones[:2]] if preliminar
+        else [k for k, _ in acciones],
         texto=texto, observacion=observacion, veredicto=veredicto,
         sugerencia=sugerencia, salvedad=salvedad, nivel=nivel,
         senales=senales, protectores=protectores, ventana=n_dias,
